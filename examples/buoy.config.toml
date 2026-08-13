@@ -1,0 +1,56 @@
+# Example nomad profile for the Buoy dotfiles repo (github.com/sn3rt/buoy).
+#
+# Install at $XDG_CONFIG_HOME/nomad/config.toml (or point --config / NOMAD_CONFIG
+# at a copy of this file) to reuse Buoy's terminal profile as the payload nomad
+# ships to remote hosts.
+
+[profile]
+name = "buoy"
+
+# Either a fixed path:
+# root = "/home/you/src/buoy"
+# ...or resolve it from an environment variable, mirroring the old
+# nomad bash script's DOTFILES_DIR override:
+root = { root_env = "DOTFILES_DIR" }
+
+[profile.validate]
+git = true
+files = [".zshrc", "profiles/terminal.links"]
+dirs = [".config"]
+
+[profile.payload]
+# Line-based manifest, one repo-relative path per line; each entry must be
+# tracked by Git. Blank lines and lines starting with `#` are ignored.
+manifest = "profiles/terminal.links"
+extra = [
+  ".config/nomad/bashrc",
+  "install-tools.sh",
+  "update-versions.sh",
+  "versions.toml",
+  "profiles/terminal.links",
+]
+
+[profile.environment]
+SHELL = "{shell}"
+DOTS = "{remote_root}"
+CODEX_HOME = "{remote_root}/.codex"
+NOMAD_BIN = "{remote_root}/.local/bin"
+XDG_BIN_HOME = "{remote_root}/.local/bin"
+XDG_CONFIG_HOME = "{remote_root}/.config"
+XDG_DATA_HOME = "{remote_root}/.local/share"
+XDG_STATE_HOME = "{remote_root}/.local/state"
+XDG_CACHE_HOME = "{remote_root}/.cache"
+PATH = "{remote_root}/.local/bin:$PATH"
+
+[profile.directories]
+required = ["{remote_root}/.codex"]
+
+[profile.launchers]
+zsh = [
+  "export ZDOTDIR={remote_root}",
+  "exec {shell} -il",
+]
+bash = [
+  "unset ZDOTDIR",
+  "exec {shell} --noprofile --rcfile {remote_root}/.config/nomad/bashrc -i",
+]
