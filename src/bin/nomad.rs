@@ -8,6 +8,21 @@ fn usage() -> &'static str {
     "usage: nomad [--waypipe|-wp] [ssh options] host\n       nomad clean [ssh options] host"
 }
 
+fn help() -> String {
+    format!(
+        "{}\n\n\
+         Opens a temporary remote shell over SSH carrying a Git-tracked dotfiles\n\
+         profile, or removes a previously created one.\n\n\
+         Options:\n  \
+         --waypipe, -wp   run the interactive session through waypipe\n  \
+         --config PATH    use this config file instead of the default search order\n  \
+         --help, -h       print this help text\n\n\
+         [ssh options] are forwarded to ssh as-is (-p 2222, -J bastion, ...).\n\
+         nomad never runs a remote command; it always launches the configured shell.",
+        usage()
+    )
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -21,6 +36,15 @@ fn main() -> ExitCode {
 }
 
 fn run(mut args: Vec<String>) -> Result<ExitCode> {
+    // Checked before config loading (and before --config extraction) so
+    // --help works even with no config file present yet or an unparseable
+    // one — this deliberately prints to stdout and returns SUCCESS, unlike
+    // the usage-on-error paths below which use stderr/FAILURE.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", help());
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let mut config_path: Option<PathBuf> = None;
     if let Some(pos) = args.iter().position(|a| a == "--config") {
         if pos + 1 >= args.len() {

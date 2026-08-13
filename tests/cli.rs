@@ -289,6 +289,19 @@ fn clean_refuses_on_marker_mismatch() {
 }
 
 #[test]
+fn help_flag_prints_usage_and_exits_success_without_a_config() {
+    // Deliberately bypasses the Fixture (no --config, no sandboxed
+    // XDG_STATE_HOME) — --help must work even with no config file present.
+    Command::cargo_bin("nomad")
+        .unwrap()
+        .env_remove("NOMAD_CONFIG")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("usage: nomad"));
+}
+
+#[test]
 fn bad_usage_missing_host_exits_nonzero_with_usage() {
     let fx = setup_fixture();
 
