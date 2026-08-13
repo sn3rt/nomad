@@ -21,6 +21,47 @@ pub struct PreparedSession {
     pub state_path: PathBuf,
 }
 
+/// Closes the SSH ControlMaster connection on drop unless [`disarm`](Self::disarm)
+/// was called first. Guarantees `control_close` runs on every early
+/// `?`/`bail!` return in [`Nomad::prepare`]/[`Nomad::clean`], mirroring the
+/// bash script's `trap cleanup_local EXIT`, which the naive port of this
+/// logic silently dropped (leaking a backgrounded `ssh -MNf` process plus
+/// its control socket on any mid-setup failure).
+struct ControlGuard<'g, T: Transport> {
+    transport: &'g T,
+    dest: &'g str,
+    ssh_args: &'g [String],
+    socket: PathBuf,
+    disarmed: bool,
+}
+
+impl<'g, T: Transport> ControlGuard<'g, T> {
+    fn new(transport: &'g T, dest: &'g str, ssh_args: &'g [String], socket: PathBuf) -> Self {
+        Self {
+            transport,
+            dest,
+            ssh_args,
+            socket,
+            disarmed: false,
+        }
+    }
+
+    /// Hands responsibility for closing the connection to the caller
+    /// (used when a prepared session must stay open into a later `enter()`).
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl<'g, T: Transport> Drop for ControlGuard<'g, T> {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.transport
+                .control_close(self.dest, self.ssh_args, &self.socket);
+        }
+    }
+}
+
 impl<'a, T: Transport> Nomad<'a, T> {
     pub fn new(transport: &'a T, profile: &'a Profile) -> Self {
         Self { transport, profile }
@@ -38,6 +79,8 @@ impl<'a, T: Transport> Nomad<'a, T> {
         self.transport
             .control_open(&dest.host, &dest.ssh_args, &socket)
             .context("failed to open control connection")?;
+        let mut guard =
+            ControlGuard::new(self.transport, &dest.host, &dest.ssh_args, socket.clone());
 
         let state_dir = session::state_dir()?;
         let state_path = session::state_file_path(&state_dir, root, &dest.host, &dest.ssh_args);
@@ -165,6 +208,9 @@ impl<'a, T: Transport> Nomad<'a, T> {
             )
             .context("failed to write remote launcher")?;
 
+        // The control connection must stay open into the later `enter()` call.
+        guard.disarm();
+
         Ok(PreparedSession {
             socket,
             remote_root,
@@ -174,23 +220,27 @@ impl<'a, T: Transport> Nomad<'a, T> {
     }
 
     /// Launches the interactive remote shell and returns its exit status.
+    /// Closes the control connection afterward regardless of outcome.
     pub fn enter(
         &self,
         dest: &Destination,
         session: &PreparedSession,
         use_waypipe: bool,
     ) -> Result<ExitStatus> {
+        let _guard = ControlGuard::new(
+            self.transport,
+            &dest.host,
+            &dest.ssh_args,
+            session.socket.clone(),
+        );
         let remote_launcher = format!("{}/.nomad-shell", session.remote_root);
-        let status = self.transport.interactive(
+        self.transport.interactive(
             &dest.host,
             &dest.ssh_args,
             &session.socket,
             &remote_launcher,
             use_waypipe,
-        )?;
-        self.transport
-            .control_close(&dest.host, &dest.ssh_args, &session.socket);
-        Ok(status)
+        )
     }
 
     /// Removes the remote temp root for `dest`, guarding against unsafe
@@ -208,6 +258,9 @@ impl<'a, T: Transport> Nomad<'a, T> {
         self.transport
             .control_open(&dest.host, &dest.ssh_args, &socket)
             .context("failed to open control connection")?;
+        // `clean` always wants the connection closed by the time it returns,
+        // success or failure, so the guard is never disarmed here.
+        let _guard = ControlGuard::new(self.transport, &dest.host, &dest.ssh_args, socket.clone());
 
         let marker_matches = self
             .transport
@@ -223,8 +276,6 @@ impl<'a, T: Transport> Nomad<'a, T> {
             .unwrap_or_default();
 
         if marker_matches.trim() != record.marker {
-            self.transport
-                .control_close(&dest.host, &dest.ssh_args, &socket);
             bail!(
                 "refusing to remove {}: session marker mismatch",
                 record.remote_root
@@ -243,9 +294,6 @@ impl<'a, T: Transport> Nomad<'a, T> {
                 ),
             )
             .context("failed to remove remote temp directory")?;
-
-        self.transport
-            .control_close(&dest.host, &dest.ssh_args, &socket);
 
         if !removed {
             bail!("failed to remove remote directory {}", record.remote_root);
@@ -316,6 +364,154 @@ fn render_launcher(
 mod tests {
     use super::*;
     use crate::profile::{Directories, Launchers, Payload, RootSpec, Validate};
+    use std::cell::RefCell;
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        calls: RefCell<Vec<String>>,
+        remote_shell: RefCell<String>,
+    }
+
+    impl RecordingTransport {
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Transport for RecordingTransport {
+        fn control_open(&self, _dest: &str, _ssh_args: &[String], _socket: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("control_open".into());
+            Ok(())
+        }
+
+        fn control_close(&self, _dest: &str, _ssh_args: &[String], _socket: &Path) {
+            self.calls.borrow_mut().push("control_close".into());
+        }
+
+        fn remote_status(
+            &self,
+            _dest: &str,
+            _ssh_args: &[String],
+            _socket: &Path,
+            remote_cmd: &str,
+        ) -> Result<bool> {
+            self.calls
+                .borrow_mut()
+                .push(format!("remote_status:{remote_cmd}"));
+            Ok(false)
+        }
+
+        fn remote_capture(
+            &self,
+            _dest: &str,
+            _ssh_args: &[String],
+            _socket: &Path,
+            remote_cmd: &str,
+        ) -> Result<String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("remote_capture:{remote_cmd}"));
+            if remote_cmd.starts_with("mktemp") {
+                Ok("/tmp/nomad.fake".to_string())
+            } else if remote_cmd.starts_with("command -v zsh") {
+                Ok(self.remote_shell.borrow().clone())
+            } else {
+                Ok(String::new())
+            }
+        }
+
+        fn remote_write_file(
+            &self,
+            _dest: &str,
+            _ssh_args: &[String],
+            _socket: &Path,
+            remote_path: &str,
+            _contents: &[u8],
+            _executable: bool,
+        ) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("remote_write_file:{remote_path}"));
+            Ok(())
+        }
+
+        fn stream_tar(
+            &self,
+            _dest: &str,
+            _ssh_args: &[String],
+            _socket: &Path,
+            _local_root: &Path,
+            _paths: &[PathBuf],
+            _remote_dir: &str,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push("stream_tar".into());
+            Ok(())
+        }
+
+        fn interactive(
+            &self,
+            _dest: &str,
+            _ssh_args: &[String],
+            _socket: &Path,
+            _remote_command: &str,
+            _use_waypipe: bool,
+        ) -> Result<ExitStatus> {
+            self.calls.borrow_mut().push("interactive".into());
+            Ok(ExitStatus::from_raw(0))
+        }
+    }
+
+    #[test]
+    fn control_guard_closes_on_drop_unless_disarmed() {
+        let transport = RecordingTransport::default();
+        {
+            let _guard = ControlGuard::new(&transport, "host", &[], PathBuf::from("/tmp/sock"));
+        }
+        assert_eq!(transport.calls(), vec!["control_close".to_string()]);
+    }
+
+    #[test]
+    fn control_guard_stays_open_when_disarmed() {
+        let transport = RecordingTransport::default();
+        {
+            let mut guard = ControlGuard::new(&transport, "host", &[], PathBuf::from("/tmp/sock"));
+            guard.disarm();
+        }
+        assert!(transport.calls().is_empty());
+    }
+
+    #[test]
+    fn prepare_closes_control_connection_when_shell_resolution_fails() {
+        let _env_guard = ENV_LOCK.lock().unwrap();
+        let state_tmp = tempfile::tempdir().unwrap();
+        let prev_xdg_state = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("XDG_STATE_HOME", state_tmp.path());
+
+        // remote_shell defaults to "" — simulates neither zsh nor bash installed.
+        let transport = RecordingTransport::default();
+        let profile = test_profile();
+        let nomad = Nomad::new(&transport, &profile);
+        let dest = Destination {
+            host: "host".to_string(),
+            ssh_args: vec![],
+            use_waypipe: false,
+        };
+
+        let result = nomad.prepare(&dest, Path::new("/tmp"));
+
+        match prev_xdg_state {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+
+        assert!(result.is_err());
+        assert!(transport.calls().contains(&"control_close".to_string()));
+    }
 
     fn test_profile() -> Profile {
         Profile {
