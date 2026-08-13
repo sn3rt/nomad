@@ -287,19 +287,16 @@ fn render_launcher(
     let mut script = String::from("#!/usr/bin/env sh\n");
 
     for (key, template) in &profile.environment {
+        // `render` already shell-quotes each substituted fragment; any literal
+        // shell syntax left in the template (e.g. a trailing `:$PATH`) is
+        // intentionally left unquoted so it still expands at export time.
         let value = Profile::render(template, &vars);
-        script.push_str(&format!(
-            "export {key}={}\n",
-            crate::transport::shell_quote(&value)
-        ));
+        script.push_str(&format!("export {key}={value}\n"));
     }
 
     for dir_template in &profile.directories.required {
         let dir = Profile::render(dir_template, &vars);
-        script.push_str(&format!(
-            "mkdir -p {} || exit 1\n",
-            crate::transport::shell_quote(&dir)
-        ));
+        script.push_str(&format!("mkdir -p {dir} || exit 1\n"));
     }
 
     let launcher_lines = match remote_shell_name {
@@ -343,7 +340,21 @@ mod tests {
         let profile = test_profile();
         let script = render_launcher(&profile, "/tmp/nomad.abc", "/usr/bin/zsh", "zsh");
         assert!(script.contains("export DOTS='/tmp/nomad.abc'"));
-        assert!(script.contains("/usr/bin/zsh -il"));
+        assert!(script.contains("'/usr/bin/zsh' -il"));
+    }
+
+    #[test]
+    fn launcher_leaves_literal_shell_syntax_around_placeholders_unquoted() {
+        let mut profile = test_profile();
+        profile.environment.insert(
+            "PATH".to_string(),
+            "{remote_root}/.local/bin:$PATH".to_string(),
+        );
+        let script = render_launcher(&profile, "/tmp/nomad.abc", "/usr/bin/zsh", "zsh");
+        // The remote_root fragment is quoted, but the trailing `:$PATH` is left
+        // bare so the remote shell still expands it instead of treating it as
+        // a literal string.
+        assert!(script.contains("export PATH='/tmp/nomad.abc'/.local/bin:$PATH\n"));
     }
 
     #[test]

@@ -172,11 +172,17 @@ impl Profile {
     }
 
     /// Renders an environment/launcher template string, substituting the
-    /// supported `{placeholder}` tokens with their resolved values.
+    /// supported `{placeholder}` tokens with their shell-quoted values.
+    ///
+    /// Only the substituted fragments are quoted (mirroring the bash
+    /// script's per-value `printf '%q'`) so that literal shell syntax left
+    /// in the template around them — e.g. a trailing `:$PATH` — still
+    /// expands at remote export time instead of being neutralized by an
+    /// outer quote wrapping the whole value.
     pub fn render(template: &str, vars: &BTreeMap<&str, String>) -> String {
         let mut out = template.to_string();
         for (key, value) in vars {
-            out = out.replace(&format!("{{{key}}}"), value);
+            out = out.replace(&format!("{{{key}}}"), &crate::transport::shell_quote(value));
         }
         out
     }
@@ -231,7 +237,7 @@ mod tests {
         vars.insert("shell", "/usr/bin/zsh".to_string());
         assert_eq!(
             Profile::render("export DOTS={remote_root}; exec {shell} -il", &vars),
-            "export DOTS=/tmp/nomad.abc; exec /usr/bin/zsh -il"
+            "export DOTS='/tmp/nomad.abc'; exec '/usr/bin/zsh' -il"
         );
     }
 
