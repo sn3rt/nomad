@@ -22,10 +22,13 @@ itself would wire in.
 ```sh
 nomad [--waypipe|-wp] [ssh options] host
 nomad clean [ssh options] host
+nomad --help
 ```
 
 - `[ssh options]` are forwarded to `ssh` as-is (`-p 2222`, `-J bastion`,
   `-i ~/.ssh/id_ed25519`, ...).
+- `--help` / `-h` prints usage and exits — works even with no config file
+  present.
 - `--waypipe` / `-wp` runs the interactive session through `waypipe` (which
   must be installed locally and on the remote host).
 - `nomad clean` removes the remote temp directory tracked for that
@@ -90,13 +93,19 @@ A Nix flake + direnv config provide a dev shell with the Rust toolchain,
 ```sh
 direnv allow    # first time only
 cargo build
-cargo test
-cargo clippy --all-targets
+cargo test --features test-support   # runs the CLI-against-fake-ssh suite too
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 ```
 
+`test-support` gates a `fake-ssh` binary (used only by `tests/cli.rs` to
+simulate `ssh`/`waypipe` without any real network access) so it's never part
+of a normal `cargo build`/release. Plain `cargo test` skips that suite.
+
 Without Nix/direnv, any Rust 2021 toolchain (`rustup`) and a system `ssh` +
-`tar` are sufficient — `cargo build`/`cargo test` work the same way.
+`tar` are sufficient — `cargo build`/`cargo test` work the same way. CI
+(`.github/workflows/ci.yml`) runs `fmt`, `clippy -D warnings`, and the full
+test suite on Linux and macOS for every push/PR.
 
 ## Status
 
@@ -104,6 +113,8 @@ This is an in-progress standalone extraction (see [`plan.md`](./plan.md)).
 Implemented so far: config loading, profile resolution and payload
 packaging, ssh-argument-aware CLI parsing, session state/fingerprinting,
 the `OpenSshTransport` (ControlMaster reuse, tar streaming, remote launcher
-generation), and `nomad clean`. Not yet done: fake-ssh-driven integration
-tests, real end-to-end SSH testing, and the actual Buoy repo migration
-(removing the bash script and wiring in `.config/nomad/config.toml` there).
+generation) with guaranteed control-connection cleanup on every error path,
+`nomad clean`, `--help`, CLI-level integration tests against a fake
+`ssh`/`waypipe`, and CI. Not yet done: real end-to-end integration tests
+against a live SSH server, and the actual Buoy repo migration (removing the
+bash script and wiring in `.config/nomad/config.toml` there).
