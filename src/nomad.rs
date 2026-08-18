@@ -191,6 +191,21 @@ impl<'a, T: Transport> Nomad<'a, T> {
             bail!("unsupported remote shell resolved: {remote_shell}");
         }
 
+        if dest.use_waypipe {
+            let available = self
+                .transport
+                .remote_status(
+                    &dest.host,
+                    &dest.ssh_args,
+                    &socket,
+                    "command -v waypipe >/dev/null 2>&1",
+                )
+                .unwrap_or(false);
+            if !available {
+                bail!("waypipe mode requires waypipe on the remote host");
+            }
+        }
+
         let launcher = render_launcher(
             self.profile,
             &remote_root,

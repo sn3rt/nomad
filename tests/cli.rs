@@ -338,6 +338,7 @@ fn waypipe_mode_invokes_waypipe_then_ssh() {
     fx.nomad()
         .env("FAKE_SSH_MKTEMP_OUTPUT", "/tmp/nomad.fake")
         .env("FAKE_SSH_REMOTE_SHELL", "/bin/zsh")
+        .env("FAKE_SSH_REMOTE_WAYPIPE_EXIT", "0") // waypipe present on the remote
         .args(["--waypipe", "host"])
         .assert()
         .success();
@@ -350,6 +351,32 @@ fn waypipe_mode_invokes_waypipe_then_ssh() {
     let argv = argv_of(entry);
     assert_eq!(argv[0], "waypipe");
     assert_eq!(argv[1], "ssh");
+}
+
+#[test]
+fn waypipe_mode_fails_when_remote_lacks_waypipe() {
+    let fx = setup_fixture();
+
+    fx.nomad()
+        .env("FAKE_SSH_MKTEMP_OUTPUT", "/tmp/nomad.fake")
+        .env("FAKE_SSH_REMOTE_SHELL", "/bin/zsh")
+        .env("FAKE_SSH_REMOTE_WAYPIPE_EXIT", "1") // waypipe missing on the remote
+        .args(["--waypipe", "host"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "waypipe mode requires waypipe on the remote host",
+        ));
+
+    let log = fx.read_log();
+    assert!(
+        !log.iter().any(|e| e["shape"] == "waypipe_interactive"),
+        "the interactive session must not start when the remote lacks waypipe"
+    );
+    assert!(
+        log.iter().any(|e| e["shape"] == "control_close"),
+        "the control connection must still be closed on this failure path"
+    );
 }
 
 // Sanity check on the fixture itself, independent of `nomad`: proves

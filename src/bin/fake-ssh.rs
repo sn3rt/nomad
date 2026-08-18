@@ -101,6 +101,13 @@ fn dispatch_plain_command(remote_cmd: &str) -> (&'static str, i32, Option<String
             Some(env::var("FAKE_SSH_REMOTE_SHELL").unwrap_or_default()),
             false,
         )
+    } else if remote_cmd.starts_with("command -v waypipe") {
+        (
+            "waypipe_check",
+            env_i32("FAKE_SSH_REMOTE_WAYPIPE_EXIT", 0),
+            None,
+            false,
+        )
     } else if remote_cmd.starts_with("test -d") {
         ("test_d", env_i32("FAKE_SSH_TEST_D_EXIT", 1), None, false)
     } else if remote_cmd.contains("tar -C") && remote_cmd.contains("-xf") {
