@@ -78,7 +78,7 @@ PATH = "{remote_root}/.local/bin:$PATH" # substituted per-fragment and
                                          # left to expand remotely.
 
 [profile.directories]
-required = ["{remote_root}/.codex"]     # mkdir -p'd before the shell starts
+required = ["{remote_root}/.codex"]     # mkdir -p'd and chmod 700'd before the shell starts
 
 [profile.launchers]
 zsh = ["export ZDOTDIR={remote_root}", "exec {shell} -il"]

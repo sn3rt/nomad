@@ -345,6 +345,11 @@ fn render_launcher(
     for dir_template in &profile.directories.required {
         let dir = Profile::render(dir_template, &vars);
         script.push_str(&format!("mkdir -p {dir} || exit 1\n"));
+        // These are private working directories nomad creates outside the
+        // tracked payload (e.g. CODEX_HOME) — lock them to owner-only,
+        // matching the bash original, rather than inheriting the remote's
+        // ambient umask.
+        script.push_str(&format!("chmod 700 {dir} || exit 1\n"));
     }
 
     let launcher_lines = match remote_shell_name {
@@ -551,6 +556,15 @@ mod tests {
         // bare so the remote shell still expands it instead of treating it as
         // a literal string.
         assert!(script.contains("export PATH='/tmp/nomad.abc'/.local/bin:$PATH\n"));
+    }
+
+    #[test]
+    fn launcher_locks_required_directories_to_owner_only() {
+        let mut profile = test_profile();
+        profile.directories.required = vec!["{remote_root}/.codex".to_string()];
+        let script = render_launcher(&profile, "/tmp/nomad.abc", "/usr/bin/zsh", "zsh");
+        assert!(script.contains("mkdir -p '/tmp/nomad.abc'/.codex || exit 1\n"));
+        assert!(script.contains("chmod 700 '/tmp/nomad.abc'/.codex || exit 1\n"));
     }
 
     #[test]
